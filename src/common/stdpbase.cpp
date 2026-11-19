@@ -65,6 +65,13 @@ wxString wxStandardPathsBase::GetExecutablePath() const
     if (wxIsAbsolutePath(argv0))
         return argv0;
 
+    // A relative path with a directory part, e.g. "./foo", is relative to the
+    // current directory and, as with execvp(), PATH is only searched for the
+    // names without any directory: otherwise we could find "/bin/./foo" for
+    // "./foo", which is a different program.
+    if ( argv0.find_first_of(wxFileName::GetPathSeparators()) != wxString::npos )
+        return wxFileName(argv0).GetAbsolutePath();
+
     // Search PATH.environment variable...
     wxPathList pathlist;
     pathlist.AddEnvList(wxT("PATH"));
