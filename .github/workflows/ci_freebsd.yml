@@ -1,0 +1,150 @@
+# CI workflow for wxWidgets builds using configure+make under FreeBSD.
+#
+# FreeBSD is run in a VM on a Linux runner, so all the build steps are done in
+# a single step running inside the VM.
+name: FreeBSD builds
+
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - '.circleci/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/ci_cmake.yml'
+      - '.github/workflows/ci_mac*.yml'
+      - '.github/workflows/ci_msw*.yml'
+      - '.github/workflows/docs_update.yml'
+      - 'build/cmake/**'
+      - 'build/msw/**'
+      - 'build/osx/**'
+      - 'build/tools/appveyor*.bat'
+      - 'distrib/**'
+      - 'docs/**'
+      - 'interface/**'
+      - 'include/msvc/**'
+      - 'include/wx/msw/**'
+      - 'include/wx/osx/**'
+      - 'include/wx/qt/**'
+      - 'locale/**'
+      - 'src/msw/**'
+      - 'src/osx/**'
+      - 'src/qt/**'
+      - '*.md'
+      - '*.yml'
+      - 'CMakeLists.txt'
+      - 'wxwidgets.props'
+  pull_request:
+    branches:
+      - master
+    paths-ignore:
+      - '.circleci/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/ci_cmake.yml'
+      - '.github/workflows/ci_mac*.yml'
+      - '.github/workflows/ci_msw*.yml'
+      - '.github/workflows/docs_update.yml'
+      - 'build/cmake/**'
+      - 'build/msw/**'
+      - 'build/osx/**'
+      - 'build/tools/appveyor*.bat'
+      - 'distrib/**'
+      - 'docs/**'
+      - 'interface/**'
+      - 'include/msvc/**'
+      - 'include/wx/msw/**'
+      - 'include/wx/osx/**'
+      - 'include/wx/qt/**'
+      - 'locale/**'
+      - 'src/msw/**'
+      - 'src/osx/**'
+      - 'src/qt/**'
+      - '*.md'
+      - '*.yml'
+      - 'CMakeLists.txt'
+      - 'wxwidgets.props'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: FreeBSD wxGTK 3
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Update submodules
+        run: |
+          # Rather than getting all submodules, get just the ones we need, as
+          # we can use system libraries instead of the other ones.
+          git submodule update --init 3rdparty/catch 3rdparty/nanosvg src/stc/scintilla src/stc/lexilla
+
+      - name: Build and test
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          copyback: false
+          # Cache the VM image after installing the packages, but rebuild it
+          # when the list of packages to install changes.
+          cache-after-prepare: true
+          cache-after-prepare-key-suffix: ${{ hashFiles('build/tools/before_install.sh') }}
+          prepare: |
+            WX_EXTRA_PACKAGES=gmake wxGTK_VERSION=3 ./build/tools/before_install.sh
+          run: |
+            set -e
+
+            wxBUILD_ARGS=-j`./build/tools/proc_count.sh`
+
+            echo '::group::Build environment'
+            uname -a
+            c++ --version
+            locale
+            echo '::endgroup::'
+
+            echo '::group::Configuring'
+            # We need to pass these flags so that libraries under /usr/local
+            # are found, because configure doesn't look for them there by
+            # default.
+            ./configure --disable-optimise --disable-debug_info CXXFLAGS=-Werror CPPFLAGS=-I/usr/local/include LDFLAGS=-L/usr/local/lib
+            echo '::endgroup::'
+
+            echo '::group::Building'
+            make -k $wxBUILD_ARGS
+            echo '::endgroup::'
+
+            echo '::group::Building tests'
+            make -k -C tests $wxBUILD_ARGS
+            echo '::endgroup::'
+
+            echo '::group::Testing'
+            # Exclude the tests known to fail under FreeBSD 15.1:
+            #
+            # - The tests waiting for wxFSW_EVENT_ACCESS would hang because
+            #   inotify doesn't report IN_ACCESS for the reads served from the
+            #   page cache in this version (fixed by e076ee22f2a6 in stable/15).
+            # - NonBMPCharPrintf fails because swprintf() returns EILSEQ for
+            #   the characters outside of the BMP in the "C" locale.
+            wx_tests_selection='~[.] ~wxFileSystemWatcher::EventAccess ~wxFileSystemWatcher::SingleWatchtypeEvent ~NonBMPCharPrintf'
+            (cd tests && WX_TEST_WEBREQUEST_URL=0 ./test -d 1 $wx_tests_selection)
+            echo '::endgroup::'
+
+            echo '::group::Building samples'
+            make -k -C samples $wxBUILD_ARGS
+            echo '::endgroup::'
+
+            echo '::group::Testing installation'
+            make install
+            # Building the sample requires GNU make.
+            gmake -C samples/minimal -f makefile.unx clean
+            gmake -C samples/minimal -f makefile.unx $wxBUILD_ARGS
+            echo '::endgroup::'
